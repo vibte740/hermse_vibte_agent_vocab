@@ -66,6 +66,9 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 SUPABASE_TABLE = "vibte_videos"
 
+MEGA_EMAIL = os.environ.get("MEGA_EMAIL", "")
+MEGA_PASSWORD = os.environ.get("MEGA_PASSWORD", "")
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE = os.path.join(BASE, "generate_vibte_video.py")
 EPISODES_FILE = os.path.join(BASE, "episodes.json")
@@ -104,8 +107,9 @@ def setup_logging():
     log.setLevel(logging.INFO)
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
+    import io
     console = logging.StreamHandler(
-        open(sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1)
+        io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     )
     console.setFormatter(fmt)
     log.addHandler(console)
@@ -310,7 +314,7 @@ def generate_script(episode, output_path):
 
     ep_dict_lines = ["EPISODE = {"]
     for key in [
-        "level", "subtitle", "word1", "word1_color", "word2", "word2_color",
+        "id", "level", "subtitle", "word1", "word1_color", "word2", "word2_color",
         "word1_pos", "word1_def", "word1_example", "word1_icon",
         "word2_pos", "word2_def", "word2_example", "word2_icon",
         "cards_header", "word1_card_sub", "word1_card_lines",
@@ -382,22 +386,33 @@ def retry(fn, attempts=3, base_delay=5, what="operation"):
 
 def upload_to_mega(video_path, slug):
     remote_name = f"{slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-    remote_path = f"{MEGA_BASE}/{remote_name}"
 
     def attempt():
-        r = subprocess.run(["megaput", "--path", remote_path, video_path],
-                            capture_output=True, text=True, timeout=120)
-        if r.returncode != 0:
-            return False, r.stderr.strip()
-        return True, remote_path
+        try:
+            # Fix mega.py incompatibility with Python 3.12+ (asyncio.coroutine removed)
+            import asyncio
+            if not hasattr(asyncio, 'coroutine'):
+                asyncio.coroutine = lambda fn: fn
+            from mega import Mega
+            mega = Mega()
+            m = mega.login(MEGA_EMAIL, MEGA_PASSWORD)
+            # Ensure target folder exists
+            try:
+                m.find(MEGA_BASE)
+            except Exception:
+                m.create_folder(MEGA_BASE.replace("/Root/", ""))
+            uploaded = m.upload(video_path, dest_dir=MEGA_BASE)
+            if uploaded:
+                link = m.get_upload_link(uploaded)
+                return True, link
+            return False, "Upload returned None"
+        except Exception as e:
+            return False, str(e)
 
     ok, detail = retry(attempt, attempts=3, base_delay=10, what="MEGA upload")
     if not ok:
         return False, None
-
-    r2 = subprocess.run(["megals", "-e", remote_path], capture_output=True, text=True, timeout=30)
-    link = r2.stdout.strip() if r2.returncode == 0 else remote_path
-    return True, link
+    return True, detail
 
 
 def publish_to_tiktok(video_path, ep_id):
