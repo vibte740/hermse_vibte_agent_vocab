@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
 Vibte Video Template — renders a vocabulary learning video from EPISODE dict.
-Uses Pillow for text rendering + moviepy for video assembly (no ImageMagick needed).
+Uses Pillow for text + edge-tts for narration + moviepy for video assembly.
 """
+import asyncio
 import json
 import os
 import sys
 import tempfile
 
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import ImageClip, concatenate_videoclips
+from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
+import edge_tts
 
 EPISODE = {}
 
@@ -24,7 +26,7 @@ GRAY = (160, 160, 160)
 QUIZ_BG = (30, 30, 50)
 RESULT_BG = (20, 80, 40)
 
-FRAME_DIR = os.path.join(tempfile.gettempdir(), "vibte_frames")
+TTS_VOICE = "en-US-GuyNeural"
 
 
 def _font(size, bold=False):
@@ -38,7 +40,7 @@ def _font(size, bold=False):
             return ImageFont.load_default()
 
 
-def _draw(draw, text, xy, size, color, bold=False, center=False, max_width=None, line_spacing=1.2):
+def _draw(draw, text, xy, size, color, bold=False, center=False, max_width=None):
     font = _font(size, bold)
     if center and max_width:
         bbox = draw.textbbox((0, 0), text, font=font)
@@ -49,7 +51,7 @@ def _draw(draw, text, xy, size, color, bold=False, center=False, max_width=None,
         draw.text(xy, text, fill=color, font=font)
 
 
-def _draw_wrapped(draw, text, xy, size, color, max_width, bold=False, line_spacing=1.3):
+def _draw_wrapped(draw, text, xy, size, color, max_width, bold=False):
     font = _font(size, bold)
     words = text.split()
     lines = []
@@ -65,9 +67,8 @@ def _draw_wrapped(draw, text, xy, size, color, max_width, bold=False, line_spaci
             current = word
     if current:
         lines.append(current)
-
     y = xy[1]
-    line_h = size * line_spacing
+    line_h = size * 1.3
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
         tw = bbox[2] - bbox[0]
@@ -77,36 +78,69 @@ def _draw_wrapped(draw, text, xy, size, color, max_width, bold=False, line_spaci
     return y
 
 
-def _render_frame(render_fn, duration):
-    img = Image.new("RGB", (W, H), BG)
-    draw = ImageDraw.Draw(img)
-    render_fn(draw)
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        img.save(f.name)
-        clip = ImageClip(f.name).set_duration(duration)
-    return clip
-
-
 def _hex_to_rgb(h):
     h = h.lstrip("#")
     return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
 
 
+async def _tts(text, out_path):
+    comm = edge_tts.Communicate(text, TTS_VOICE)
+    await comm.save(out_path)
+
+
+def tts(text, out_path):
+    asyncio.run(_tts(text, out_path))
+
+
+def _audio_duration(path):
+    clip = AudioFileClip(path)
+    dur = clip.duration
+    clip.close()
+    return dur
+
+
+def _render_frame(render_fn):
+    img = Image.new("RGB", (W, H), BG)
+    draw = ImageDraw.Draw(img)
+    render_fn(draw)
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    img.save(tmp.name)
+    tmp.close()
+    return tmp.name
+
+
 def title_scene():
     level = EPISODE.get("level", "LEVEL B1")
     subtitle = EPISODE.get("subtitle", "word1 vs word2")
+    word1 = EPISODE.get("word1", "")
+    word2 = EPISODE.get("word2", "")
 
-    def render(draw):
-        draw.rectangle([(0, 0), (W, H)], fill=BG)
-        _draw(draw, level, (0, int(H * 0.35)), 72, ACCENT, bold=True, center=True, max_width=W)
-        _draw(draw, subtitle, (0, int(H * 0.48)), 54, WHITE, center=True, max_width=W)
-        _draw(draw, "Vibte English", (0, int(H * 0.60)), 40, GRAY, center=True, max_width=W)
+    narration = f"Let's learn two new words: {word1} and {word2}."
+    audio = os.path.join(tempfile.gettempdir(), "vibte_title.mp3")
+    tts(narration, audio)
+    duration = _audio_duration(audio) + 0.3
 
-    return _render_frame(render, 2.5)
+    frame = _render_frame(lambda draw: (
+        draw.rectangle([(0, 0), (W, H)], fill=BG),
+        _draw(draw, level, (0, int(H * 0.35)), 72, ACCENT, bold=True, center=True, max_width=W),
+        _draw(draw, subtitle, (0, int(H * 0.48)), 54, WHITE, center=True, max_width=W),
+        _draw(draw, "Vibte English", (0, int(H * 0.60)), 40, GRAY, center=True, max_width=W),
+    ))
+
+    clip = ImageClip(frame).set_duration(duration)
+    clip = clip.set_audio(AudioFileClip(audio))
+    return clip
 
 
 def word_card_scene(word, pos, definition, example, icon, color, card_sub, card_lines):
     color_rgb = _hex_to_rgb(color) if isinstance(color, str) else color
+
+    narration = f"{word}. {pos}. {definition}."
+    if example:
+        narration += f" Example: {example}"
+    audio = os.path.join(tempfile.gettempdir(), f"vibte_{word}.mp3")
+    tts(narration, audio)
+    duration = _audio_duration(audio) + 0.3
 
     def render(draw):
         draw.rectangle([(0, 0), (W, H)], fill=BG)
@@ -115,16 +149,23 @@ def word_card_scene(word, pos, definition, example, icon, color, card_sub, card_
         _draw(draw, f"({pos})", (0, int(H * 0.34)), 44, GRAY, center=True, max_width=W)
         _draw_wrapped(draw, definition, (50, int(H * 0.44)), 42, WHITE, W - 100)
         if example:
-            ex_text = f'"{example}"'
-            _draw_wrapped(draw, ex_text, (50, int(H * 0.62)), 34, (200, 200, 200), W - 120)
+            _draw_wrapped(draw, f'"{example}"', (50, int(H * 0.62)), 34, (200, 200, 200), W - 120)
 
-    return _render_frame(render, 5.0)
+    frame = _render_frame(render)
+    clip = ImageClip(frame).set_duration(duration)
+    clip = clip.set_audio(AudioFileClip(audio))
+    return clip
 
 
 def quiz_scene():
     question = EPISODE.get("quiz_question", "Which word fits?")
     word1 = EPISODE.get("word1", "?")
     word2 = EPISODE.get("word2", "?")
+
+    narration = f"Quick quiz! {question}"
+    audio = os.path.join(tempfile.gettempdir(), "vibte_quiz.mp3")
+    tts(narration, audio)
+    duration = _audio_duration(audio) + 0.3
 
     def render(draw):
         draw.rectangle([(0, 0), (W, H)], fill=QUIZ_BG)
@@ -133,7 +174,10 @@ def quiz_scene():
         _draw(draw, word1.upper(), (0, int(H * 0.62)), 56, ACCENT, bold=True, center=True, max_width=W)
         _draw(draw, word2.upper(), (0, int(H * 0.72)), 56, ACCENT, bold=True, center=True, max_width=W)
 
-    return _render_frame(render, 4.0)
+    frame = _render_frame(render)
+    clip = ImageClip(frame).set_duration(duration)
+    clip = clip.set_audio(AudioFileClip(audio))
+    return clip
 
 
 def result_scene():
@@ -141,13 +185,21 @@ def result_scene():
     line2 = EPISODE.get("result_line2", "")
     promo = EPISODE.get("promo_tagline", "Learn English with Vibte!")
 
+    narration = f"{line1}. {line2}. {promo}"
+    audio = os.path.join(tempfile.gettempdir(), "vibte_result.mp3")
+    tts(narration, audio)
+    duration = _audio_duration(audio) + 0.3
+
     def render(draw):
         draw.rectangle([(0, 0), (W, H)], fill=RESULT_BG)
         _draw(draw, line1, (0, int(H * 0.38)), 52, WHITE, bold=True, center=True, max_width=W)
         _draw_wrapped(draw, line2, (60, int(H * 0.50)), 40, (200, 230, 200), W - 100)
         _draw(draw, promo, (0, int(H * 0.65)), 36, ACCENT, center=True, max_width=W)
 
-    return _render_frame(render, 4.0)
+    frame = _render_frame(render)
+    clip = ImageClip(frame).set_duration(duration)
+    clip = clip.set_audio(AudioFileClip(audio))
+    return clip
 
 
 def main():
@@ -156,7 +208,6 @@ def main():
         sys.exit(1)
 
     os.makedirs(OUT_ROOT, exist_ok=True)
-    os.makedirs(FRAME_DIR, exist_ok=True)
 
     scenes = [
         title_scene(),
@@ -179,16 +230,30 @@ def main():
         OUT_VIDEO,
         fps=30,
         codec="libx264",
-        audio=False,
+        audio_codec="aac",
         preset="ultrafast",
         threads=4,
     )
+
     for s in scenes:
         try:
             os.remove(s.filename)
         except:
             pass
+        try:
+            s.close()
+        except:
+            pass
     final.close()
+
+    for name in ["vibte_title.mp3", "vibte_quiz.mp3", "vibte_result.mp3",
+                  f"vibte_{EPISODE.get('word1', '')}.mp3",
+                  f"vibte_{EPISODE.get('word2', '')}.mp3"]:
+        try:
+            os.remove(os.path.join(tempfile.gettempdir(), name))
+        except:
+            pass
+
     print(f"Rendered: {OUT_VIDEO}")
 
 
