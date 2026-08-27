@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+github_key.txt
+oxford_5k.csv
+*.log
+*.lock

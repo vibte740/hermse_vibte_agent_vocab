@@ -1,0 +1,22 @@
+Two free pieces that fit together well — a leveled word list (the CEFR tagging) plus a definitions/examples API (the content):Here's what I'd use, and why — two free sources chained together, since no single free source gives you both "CEFR-leveled word pool" and "rich definitions/examples" in one API.
+
+## 1. Oxford 3000/5000 — the leveled word list
+Oxford University Press publishes the exact CEFR level (A1–C1) for each word in the Oxford 3000/5000, and it's mirrored as plain CSV/JSON on GitHub:
+- **Official PDF-by-level** (source of truth): `oxfordlearnersdictionaries.com/wordlists/oxford3000-5000`
+- **Pre-scraped CSV/JSON** (word, part of speech, CEFR level) ready to use: winterdl/oxford-5000-vocabulary-audio-definition on GitHub ships oxford_3000.csv, oxford_5000.csv, and oxford_5000_exclusive.csv, or antdurrant/word.lists, which groups the Oxford 5000 by CEFR level with roughly 906 B1 words, 1569 B2 words, and 1391 C1 words
+
+This solves "which words are actually B1/B2/C1/C2" — that's the part that's genuinely hard to get right by hand.
+
+## 2. Free Dictionary API — definitions, POS, and example sentences
+Once you have a word + level, pull the definition/example/part-of-speech automatically:
+- Endpoint: `https://api.dictionaryapi.dev/api/v2/entries/en/<word>` — completely free, no API key required, and returns phonetics, part of speech, and per-sense definitions with example sentences as structured JSON.
+- Note: not every word returns an entry, and coverage/depth is best-effort since it's a community project — so you'll want a fallback (skip word / retry / let your LLM write the example) for misses.
+- There's also a newer alternative, `freedictionaryapi.com`, which is powered by Wiktionary data, needs no API key, and allows 1,000 requests/hour per IP — a reasonable backup if `dictionaryapi.dev` is down or missing a word.
+
+## How I'd wire it into your pipeline
+1. Load the Oxford CSV once, filtered by level → gives you a pool of candidate words per B1/B2/C1/C2.
+2. For each candidate word, hit Free Dictionary API for `partOfSpeech`, `definition`, `example`.
+3. Cross-check the picked word against your `episodes.json`/Supabase ledger so you don't reuse a word already turned into an episode.
+4. If Free Dictionary API has no entry or no example sentence, fall back to your existing LLM (9Router) to generate the definition/example in your house style — keeps quality consistent while avoiding manual writing for every word.
+
+Want me to write the actual `vocab_source.py` module (fetch Oxford list → filter unused-by-Supabase → query Free Dictionary API → emit an `episode` dict ready for your producer script)?
